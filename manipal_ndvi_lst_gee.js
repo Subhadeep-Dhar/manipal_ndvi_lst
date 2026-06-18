@@ -5,25 +5,40 @@ var roi = ee.FeatureCollection('projects/master-reactor-471013-c9/assets/Manipal
 
 var seasons = {
   'Pre-Monsoon': [3, 5],
-  'Monsoon': [6, 9],
-  'Post-Monsoon': [10, 11],
-  'Winter': [12, 2]
+  'Monsoon':     [6, 9],
+  'Post-Monsoon':[10, 11],
+  'Winter':      [12, 2]
 };
 
+// Fixed Cloud Mask using explicit Landsat 8/9 bit specifications
 function maskClouds(image) {
   var qa = image.select('QA_PIXEL');
-  var mask = qa.bitwiseAnd(1 << 1).eq(0)
-    .and(qa.bitwiseAnd(1 << 2).eq(0))
-    .and(qa.bitwiseAnd(1 << 3).eq(0))
-    .and(qa.bitwiseAnd(1 << 4).eq(0));
+  var dilatedCloudBit = (1 << 1);
+  var cirrusBit = (1 << 2);
+  var cloudBit = (1 << 3);
+  var shadowBit = (1 << 4);
+  
+  var mask = qa.bitwiseAnd(dilatedCloudBit).eq(0)
+    .and(qa.bitwiseAnd(cirrusBit).eq(0))
+    .and(qa.bitwiseAnd(cloudBit).eq(0))
+    .and(qa.bitwiseAnd(shadowBit).eq(0));
   return image.updateMask(mask);
+}
+
+// Added structural scaling function to ensure NDVI calculates correctly
+function applyScaleFactors(image) {
+  var opticalBands = image.select('SR_B.').multiply(0.0000275).add(-0.2);
+  var thermalBands = image.select('ST_B.*').multiply(0.00341802).add(149.0);
+  return image.addBands(opticalBands, null, true)
+              .addBands(thermalBands, null, true);
 }
 
 var collection = ee.ImageCollection("LANDSAT/LC08/C02/T1_L2")
   .merge(ee.ImageCollection("LANDSAT/LC09/C02/T1_L2"))
   .filterBounds(roi)
   .filterDate('2020-01-01', '2025-12-31')
-  .map(maskClouds);
+  .map(maskClouds)
+  .map(applyScaleFactors); // Scaled before composite calculations
 
 // ---------------------------------------------------------------------
 // 2. SEASONAL PROCESSING
@@ -44,14 +59,12 @@ Object.keys(seasons).forEach(function(seasonName) {
 
   var composite = seasonalCol.median();
 
-  // --- LST ---
+  // --- LST Calculation (Now safe from raw integer offsets) ---
   var lst = composite.select('ST_B10')
-    .multiply(0.00341802)
-    .add(149.0)
     .subtract(273.15)
     .clip(roi);
 
-  // --- NDVI ---
+  // --- NDVI Calculation (Now operating on scaled float values [0,1]) ---
   var ndvi = composite.normalizedDifference(['SR_B5', 'SR_B4'])
     .rename('NDVI')
     .clip(roi);
@@ -71,7 +84,7 @@ Object.keys(seasons).forEach(function(seasonName) {
   }, seasonName + ' LST', false);
 
   Map.addLayer(ndvi, {
-    min: -1, 
+    min: -0.1, // Adjusted min to capture realistic vegetation baseline
     max: 0.6, 
     palette: ['blue', 'white', 'green']
   }, seasonName + ' NDVI', false);
@@ -88,7 +101,6 @@ Object.keys(seasons).forEach(function(seasonName) {
   // -----------------------------------------------------------------
   // EXPORT TO GOOGLE DRIVE
   // -----------------------------------------------------------------
-
   Export.image.toDrive({
     image: lst,
     description: seasonName + '_LST_2020_2025',
@@ -108,7 +120,6 @@ Object.keys(seasons).forEach(function(seasonName) {
     scale: 30,
     maxPixels: 1e13
   });
-
 });
 
 Map.centerObject(roi, 13);
